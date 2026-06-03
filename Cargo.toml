@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "nep-protocol",
+    "nep-gw"
+]
+resolver = "2"
