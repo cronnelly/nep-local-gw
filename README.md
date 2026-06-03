@@ -1,10 +1,10 @@
 # 🕵️‍♂️ Local NEP Microinverter Gateway & Telemetry Parser
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-alpine-blue.svg)](Dockerfile)
 
-A local, privacy-focused gateway (`nep-gw`) and protocol parser (`nep-protocol`) designed to intercept and parse telemetry payloads sent by rebranded **NEP BDM-400** microinverters (such as those in Sunflower Balcon 440W kits). 
+A local, privacy-focused gateway (`nep-gw`) and protocol parser (`nep-protocol`) designed to intercept and parse telemetry payloads sent by rebranded **NEP BDM-400** microinverters. 
 
 It operates by spoofing the cloud endpoint `http://www.nepviewer.net/i.php`, parsing the unencrypted binary telemetry packets locally, and forwarding the decoded measurements directly to **Home Assistant (via MQTT)** and **Prometheus**.
 
