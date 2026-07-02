@@ -1,5 +1,5 @@
 use nom::{
-    bytes::complete::tag,
+    bytes::complete::{tag, take},
     number::complete::{be_u16, le_i16, le_u16, le_u32},
     IResult,
 };
@@ -12,7 +12,12 @@ pub struct NepTelemetry {
     pub ac_power_w: f64,
     pub ac_voltage_v: f64,
     pub operating_flags: u16,
+    /// Total DC input current in Amperes (sum of both MPPT channels).
     pub dc_current_a: f64,
+    /// DC input current, MPPT channel 1 (byte 31). Always 0 on single-input BDM-400.
+    pub dc_current_ch1_a: f64,
+    /// DC input current, MPPT channel 2 (byte 32). The single string on BDM-400.
+    pub dc_current_ch2_a: f64,
     pub ac_freq_hz: f64,
     pub dc_voltage_v: f64,
     pub temp_c: f64,
@@ -65,8 +70,13 @@ fn parse_header(input: &[u8]) -> IResult<&[u8], ()> {
     let (input, _) = tag([0x26, 0x00])(input)?;
     // 3-4: Cmd type (0x4014)
     let (input, _) = tag([0x40, 0x14])(input)?;
-    // 5-12: Gateway ID (8 bytes of 0xFF)
-    let (input, _) = tag([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])(input)?;
+    // 5-12: Gateway / AP identifier (8 bytes). This is NOT a fixed constant.
+    // The BDM-400 emits 0xFF padding here, but the BDM-800 emits a different
+    // value (observed: `00 00 0f 0f 0f 0f 00 00`). The original
+    // `tag([0xFF; 8])` therefore hard-rejected every non-BDM-400 device with
+    // "Header parsing failed", even though the packet and its checksums were
+    // valid. Skip the field instead of matching it. See CLAUDE.md.
+    let (input, _) = take(8usize)(input)?;
     // 13-14: Data Length (0x001c = 28 bytes)
     let (input, _) = tag([0x1C, 0x00])(input)?;
     Ok((input, ()))
@@ -100,7 +110,24 @@ fn parse_data_section(input: &[u8]) -> IResult<&[u8], NepTelemetry> {
 
     let ac_power_w = ac_power_raw as f64 / 100.0;
     let ac_voltage_v = ac_voltage_raw as f64 / 25.6;
-    let dc_current_a = dc_current_raw as f64 / 10.0;
+    // DC input current. On the single-input BDM-400 the high byte (offset 31)
+    // is always 0x00 and the low byte (offset 32) carries the single string's
+    // current at /10 A, so the historical `be_u16 / 10` worked. The dual-MPPT
+    // BDM-800 populates BOTH bytes (one per string), which made `be_u16 / 10`
+    // explode to a nonsensical ~977 A.
+    //
+    // We instead decode the two bytes as independent per-string currents at
+    // /10 A. This is exact for the BDM-400 (ch1 == 0, so the total equals the
+    // old value and the existing unit tests still pass) and physically sane
+    // for the BDM-800 (e.g. 3.8 A + 4.2 A = 8.0 A total).
+    //
+    // NOTE: the byte->channel mapping (31 = ch1, 32 = ch2) is a HYPOTHESIS
+    // derived from a single BDM-800 packet — see CLAUDE.md. Treat `dc_current_a`
+    // (the total) as the robust figure and confirm ch1/ch2 individually against
+    // a capture series before relying on them.
+    let dc_current_ch1_a = (dc_current_raw >> 8) as f64 / 10.0;
+    let dc_current_ch2_a = (dc_current_raw & 0xFF) as f64 / 10.0;
+    let dc_current_a = dc_current_ch1_a + dc_current_ch2_a;
     let ac_freq_hz = ac_freq_raw as f64 / 256.0;
     let temp_c = temp_raw as f64 / 100.0;
     let daily_energy_wh = daily_energy_raw as f64 / 5.0; // 0.2 Wh per unit
@@ -121,6 +148,8 @@ fn parse_data_section(input: &[u8]) -> IResult<&[u8], NepTelemetry> {
             ac_voltage_v,
             operating_flags,
             dc_current_a,
+            dc_current_ch1_a,
+            dc_current_ch2_a,
             ac_freq_hz,
             dc_voltage_v,
             temp_c,
@@ -182,5 +211,34 @@ mod tests {
         assert_eq!(telemetry.reactive_power_var, 5.14);
         assert_eq!(telemetry.temp_c, 49.11);
         assert_eq!(telemetry.daily_energy_wh, 1710.8);
+    }
+
+    #[test]
+    fn test_parse_payload_bdm800() {
+        // NEP BDM-800 packet captured from a live unit. The serial number has
+        // been anonymized to 0xDEADBEEF (bytes 19..22) with both checksums
+        // recomputed; every other byte is as captured.
+        // Distinguishing features vs the BDM-400 fixtures above:
+        //   - Gateway/AP field (bytes 5..12) is `00 00 0f 0f 0f 0f 00 00`, NOT
+        //     0xFF padding. The old strict `tag([0xFF; 8])` rejected this packet.
+        //   - Both DC-current bytes (31, 32) are populated (dual-MPPT), so the
+        //     old `be_u16 / 10` produced ~977 A. Per-channel decode fixes it.
+        let hex = "792600401400000f0f0f0f00001c00c3c3c3c3efbeadde0000bd56cb172010262ab0317013ab12058c05e02270";
+        let bytes = hex::decode(hex).unwrap();
+        assert!(validate_checksums(&bytes));
+        let t = parse_payload(&bytes).unwrap();
+
+        // AC-side fields decode identically to the BDM-400 layout.
+        assert_eq!(t.serial_number, 0xdeadbeef);
+        assert_eq!(t.ac_power_w, 222.05);
+        assert_eq!(t.ac_freq_hz, 49.6875); // 12720 / 256
+        assert!((t.ac_voltage_v - 237.93).abs() < 0.01); // 6091 / 25.6
+        assert_eq!(t.daily_energy_wh, 955.8);
+
+        // DC-side: two per-string currents that sum to a physically sane total,
+        // instead of the ~977 A the single-BE-u16 interpretation produced.
+        assert_eq!(t.dc_current_ch1_a, 3.8); // byte 31 = 0x26 = 38 -> /10
+        assert_eq!(t.dc_current_ch2_a, 4.2); // byte 32 = 0x2a = 42 -> /10
+        assert_eq!(t.dc_current_a, 8.0);
     }
 }

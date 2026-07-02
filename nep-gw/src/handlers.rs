@@ -1,4 +1,8 @@
-use axum::{body::Bytes, extract::State, http::StatusCode};
+use axum::{
+    body::Bytes,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+};
 use chrono::Local;
 use nep_protocol::parse_payload;
 use prometheus::{Encoder, TextEncoder};
@@ -6,13 +10,15 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use crate::metrics::{
-    AC_FREQ, AC_POWER, AC_VOLTAGE, DAILY_ENERGY, DC_CURRENT, DC_VOLTAGE, PACKETS_RECEIVED,
-    REACTIVE_POWER, REGISTRY, TEMPERATURE,
+    AC_FREQ, AC_POWER, AC_VOLTAGE, DAILY_ENERGY, DC_CURRENT, DC_CURRENT_CH1, DC_CURRENT_CH2,
+    DC_VOLTAGE, PACKETS_RECEIVED, REACTIVE_POWER, REGISTRY, TEMPERATURE,
 };
+use crate::upstream::RELAY_MARKER_HEADER;
 use crate::AppState;
 
 pub async fn handle_inverter_post(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<String, StatusCode> {
     let hex_payload: String = body.iter().map(|b| format!("{:02x}", b)).collect();
@@ -21,6 +27,25 @@ pub async fn handle_inverter_post(
         body.len(),
         hex_payload
     );
+
+    // Dual-delivery: relay the raw body to the real NEP cloud in the
+    // background, even if our own parser rejects it (the cloud may understand
+    // packet types we don't). Requests already carrying the relay marker are
+    // our own forwards bounced back (misconfigured DNS) — never re-forward
+    // those, or a single packet would loop forever.
+    if let Some(forwarder) = &state.upstream {
+        if headers.contains_key(RELAY_MARKER_HEADER) {
+            warn!(
+                "Received a request carrying {} — the upstream URL resolves back to this \
+                 gateway (DNS loop). Not forwarding.",
+                RELAY_MARKER_HEADER
+            );
+        } else {
+            let forwarder = forwarder.clone();
+            let body = body.clone();
+            tokio::spawn(async move { forwarder.forward(body).await });
+        }
+    }
 
     match parse_payload(&body) {
         Ok(telemetry) => {
@@ -34,6 +59,8 @@ pub async fn handle_inverter_post(
             AC_POWER.set(telemetry.ac_power_w);
             AC_VOLTAGE.set(telemetry.ac_voltage_v);
             DC_CURRENT.set(telemetry.dc_current_a);
+            DC_CURRENT_CH1.set(telemetry.dc_current_ch1_a);
+            DC_CURRENT_CH2.set(telemetry.dc_current_ch2_a);
             AC_FREQ.set(telemetry.ac_freq_hz);
             DC_VOLTAGE.set(telemetry.dc_voltage_v);
             TEMPERATURE.set(telemetry.temp_c);

@@ -8,6 +8,10 @@ use tracing::{error, info, warn};
 pub struct MqttConfig {
     pub host: String,
     pub port: u16,
+    /// `(username, password)` for brokers requiring authentication.
+    pub credentials: Option<(String, String)>,
+    /// Inverter model name shown in Home Assistant (e.g. "BDM-400", "BDM-800").
+    pub model: String,
 }
 
 /// Dynamic MQTT Worker task using rumqttc
@@ -21,6 +25,10 @@ pub async fn run_mqtt_worker(config: MqttConfig, mut rx: mpsc::Receiver<NepTelem
     );
     let mut mqttoptions = MqttOptions::new("nep-gateway", mqtt_host, mqtt_port);
     mqttoptions.set_keep_alive(std::time::Duration::from_secs(5));
+    if let Some((username, password)) = config.credentials {
+        info!("Using MQTT authentication as user '{}'", username);
+        mqttoptions.set_credentials(username, password);
+    }
 
     let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
 
@@ -50,7 +58,7 @@ pub async fn run_mqtt_worker(config: MqttConfig, mut rx: mpsc::Receiver<NepTelem
                 "Publishing Home Assistant MQTT Discovery configs for serial {}...",
                 serial
             );
-            if let Err(e) = publish_ha_discovery(&client, &serial).await {
+            if let Err(e) = publish_ha_discovery(&client, &serial, &config.model).await {
                 error!("HA Discovery publish failed: {:?}", e);
             } else {
                 discovered = true;
@@ -71,6 +79,8 @@ pub async fn run_mqtt_worker(config: MqttConfig, mut rx: mpsc::Receiver<NepTelem
             "ac_freq_hz": (telemetry.ac_freq_hz * 100.0).round() / 100.0,
             "dc_voltage_v": (telemetry.dc_voltage_v * 100.0).round() / 100.0,
             "dc_current_a": (telemetry.dc_current_a * 100.0).round() / 100.0,
+            "dc_current_ch1_a": (telemetry.dc_current_ch1_a * 100.0).round() / 100.0,
+            "dc_current_ch2_a": (telemetry.dc_current_ch2_a * 100.0).round() / 100.0,
             "dc_power_w": (dc_power * 100.0).round() / 100.0,
             "efficiency_percent": (efficiency * 100.0).round() / 100.0,
             "temperature_c": (telemetry.temp_c * 100.0).round() / 100.0,
@@ -101,11 +111,12 @@ pub async fn run_mqtt_worker(config: MqttConfig, mut rx: mpsc::Receiver<NepTelem
 async fn publish_ha_discovery(
     client: &AsyncClient,
     serial: &str,
+    model: &str,
 ) -> Result<(), rumqttc::ClientError> {
     let device = json!({
         "identifiers": [format!("nep_bdm_{}", serial)],
-        "name": format!("NEP BDM-400 ({})", serial),
-        "model": "BDM-400",
+        "name": format!("NEP {} ({})", model, serial),
+        "model": model,
         "manufacturer": "Northern Electric Power (NEP)"
     });
 
@@ -140,6 +151,20 @@ async fn publish_ha_discovery(
             "current",
             "A",
             "dc_current_a",
+        ),
+        (
+            "dc_current_ch1",
+            "DC PV Current CH1",
+            "current",
+            "A",
+            "dc_current_ch1_a",
+        ),
+        (
+            "dc_current_ch2",
+            "DC PV Current CH2",
+            "current",
+            "A",
+            "dc_current_ch2_a",
         ),
         ("dc_power", "DC PV Power", "power", "W", "dc_power_w"),
         (

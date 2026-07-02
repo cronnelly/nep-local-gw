@@ -1,0 +1,42 @@
+[Unit]
+Description=Local NEP microinverter gateway (spoofs www.nepviewer.net)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Dual-delivery on by default: inverter POSTs are also relayed to the real
+# NEP cloud. To run purely locally, remove the --forward-upstream flag (the
+# CLI flag wins over the env file, so FORWARD_UPSTREAM=false would not do it).
+ExecStart=/usr/local/bin/nep-gw --forward-upstream
+Environment=PORT=80
+Environment=RUST_LOG=info
+# MQTT_HOST / MQTT_PORT / MQTT_USERNAME / MQTT_PASSWORD (and UPSTREAM_URL etc.)
+# go in this root-owned, chmod-600 file so the password never appears in the
+# world-readable unit or in `systemctl show` output.
+EnvironmentFile=-/etc/nep-gw.env
+
+# Unprivileged, but allowed to bind port 80.
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+Restart=on-failure
+RestartSec=5
+
+# Sandboxing — the gateway only needs the network and read-only system dirs.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

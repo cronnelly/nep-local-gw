@@ -4,7 +4,7 @@
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-alpine-blue.svg)](Dockerfile)
 
-A local, privacy-focused gateway (`nep-gw`) and protocol parser (`nep-protocol`) designed to intercept and parse telemetry payloads sent by rebranded **NEP BDM-400** microinverters. 
+A local, privacy-focused gateway (`nep-gw`) and protocol parser (`nep-protocol`) designed to intercept and parse telemetry payloads sent by rebranded **NEP BDM-400** and **NEP BDM-800** microinverters. 
 
 It operates by spoofing the cloud endpoint `http://www.nepviewer.net/i.php`, parsing the unencrypted binary telemetry packets locally, and forwarding the decoded measurements directly to **Home Assistant (via MQTT)** and **Prometheus**.
 
@@ -17,7 +17,9 @@ It operates by spoofing the cloud endpoint `http://www.nepviewer.net/i.php`, par
 * **Auto-Discovery in Home Assistant**: Automatic sensor creation in Home Assistant via MQTT Discovery (voltage, power, daily energy, temperature, frequency, reactive power, status).
 * **Prometheus Metrics**: Scraping endpoint `/metrics` for custom Grafana dashboards.
 * **NOM Parser**: Fast, safe binary parsing of the 45-byte payload implemented in Rust.
-* **DC Voltage & Power Reconstruction**: Dynamically estimates DC PV current, voltage, and panel power using standard inverter efficiency curves (since the inverter natively omits DC PV voltage from its uploads).
+* **BDM-400 & BDM-800 Support**: Handles both the single-input BDM-400 and the dual-MPPT BDM-800, including independent per-channel DC current readings on the BDM-800 (verified against a live packet capture). Set the Home Assistant model name via `INVERTER_MODEL` / `--model`.
+* **Optional Cloud Passthrough**: Dual-delivery mode (`--forward-upstream`) relays packets to the real NEP cloud so the official app keeps working alongside local monitoring.
+* **DC Voltage & Power Reconstruction**: Dynamically estimates DC PV voltage and panel power using standard inverter efficiency curves (since the inverter natively omits DC PV voltage from its uploads). ⚠️ The reconstruction assumes the BDM-400's panel topology — on the BDM-800 the AC-side values and per-channel DC currents are reliable, but treat reconstructed DC voltage/power/efficiency with skepticism.
 
 ---
 
@@ -32,7 +34,7 @@ The microinverter uploads unencrypted HTTP `POST` requests to `/i.php` containin
 | `0` | 1 | `uint8` | Constant `0x79` | Packet framing start signature |
 | `1–2` | 2 | `uint16` (LE) | `38` | Payload length from offset 5 to 42 |
 | `3–4` | 2 | `uint16` (BE) | `0x4014` | Fixed command identifier |
-| `5–12` | 8 | `bytes` | `0xFF` padding | Gateway/AP identifier padding |
+| `5–12` | 8 | `bytes` | model-dependent | Gateway/AP identifier (`0xFF` padding on BDM-400, other values on BDM-800; not matched by the parser) |
 | `13–14` | 2 | `uint16` (LE) | `28` | Length of data section (offset 15 to 42) |
 | `15–18` | 4 | `bytes` | `0xC3C3C3C3` | Data section synchronization header |
 | `19–22` | 4 | `uint32` (LE) | Hex Integer | Inverter Serial Number |
@@ -40,7 +42,7 @@ The microinverter uploads unencrypted HTTP `POST` requests to `/i.php` containin
 | `25–26` | 2 | `uint16` (LE) | `/ 100.0` (W) | AC Active Power Output in Watts |
 | `27–28` | 2 | `uint16` (LE) | `/ 25.6` (V) | Grid AC Voltage in Volts (Q8 decivolts) |
 | `29–30` | 2 | `uint16` (LE) | Bitmask / Vref | Internal flags and DSP Reference Voltage |
-| `31–32` | 2 | `uint16` (BE) | `/ 10.0` (A) | DC Input Current in Amperes |
+| `31–32` | 2 | `2 × uint8` | `/ 10.0` (A) each | DC Input Current per MPPT channel (byte 31 = CH1, byte 32 = CH2; CH1 always `0` on the single-input BDM-400 — channel order inferred from a single BDM-800 capture) |
 | `33–34` | 2 | `uint16` (LE) | `/ 256.0` (Hz) | Grid AC Frequency in Hertz (Q8 Hz) |
 | `35–36` | 2 | `uint16` (LE) | `/ 100.0` (°C) | DSP Temperature in Celsius |
 | `37–38` | 2 | `uint16` (LE) | `/ 5.0` (Wh) | Daily Energy Accumulator in Wh (0.2 Wh / unit) |
@@ -68,7 +70,66 @@ The gateway is configured via the following environment variables:
 | `PORT` | The port the HTTP server binds to | `80` |
 | `MQTT_HOST` | Hostname/IP of your MQTT broker | `::1` |
 | `MQTT_PORT` | Port of your MQTT broker | `1883` |
+| `MQTT_USERNAME` | Username for MQTT broker authentication (omit for anonymous) | *(none)* |
+| `MQTT_PASSWORD` | Password for MQTT broker authentication (requires `MQTT_USERNAME`) | *(empty)* |
 | `RUST_LOG` | Tracing logging level (`info`, `debug`, `error`) | `info` |
+| `INVERTER_MODEL` | Inverter model shown in Home Assistant (e.g. `BDM-800`); also `--model <name>` | `BDM-400` |
+| `FORWARD_UPSTREAM` | Set to `true` to also relay inverter POSTs to the real NEP cloud (dual-delivery mode) | `false` |
+| `UPSTREAM_URL` | Upstream endpoint used in dual-delivery mode (plain HTTP only) | `http://www.nepviewer.net/i.php` |
+
+### Dual-Delivery Mode (optional cloud passthrough)
+
+By default `nep-gw` fully replaces the NEP cloud: the official app/portal stops
+updating once the inverter's DNS points here. To keep the cloud working too,
+enable dual-delivery with the `--forward-upstream` CLI flag (or
+`FORWARD_UPSTREAM=true`):
+
+```bash
+nep-gw --forward-upstream
+# or pin the upstream explicitly:
+nep-gw --forward-upstream --upstream-url http://1.2.3.4/i.php
+```
+
+Every raw inverter POST is then relayed in the background to the real
+`www.nepviewer.net` — even packets the local parser doesn't understand. The
+inverter always gets the local time-sync response immediately, so a cloud
+outage never affects local operation. Relay outcomes are counted in the
+`nep_upstream_forwards_total` / `nep_upstream_forward_errors_total` Prometheus
+metrics.
+
+**Requirement:** the machine running `nep-gw` must resolve the *real* IP of
+`www.nepviewer.net` (scope your DNS spoof to the inverter, or give the gateway
+host an honest resolver). If the host's DNS is also spoofed, either pin the
+real IP with `--upstream-url http://<real-ip>/i.php` (the correct `Host` header
+is always sent), or leave it — relayed requests carry an `X-NEP-GW-Relay`
+marker and the gateway refuses to re-forward them, so a DNS loop degrades into
+a logged warning rather than an infinite relay loop.
+
+---
+
+## ⚙️ Running as a systemd Service
+
+A hardened unit file is provided as `nep-gw.service`. It runs the gateway as an
+unprivileged dynamic user with `AmbientCapabilities=CAP_NET_BIND_SERVICE`, so it
+can bind port 80 without root and without `setcap` on the binary:
+
+```bash
+cargo build --release
+sudo install -m 755 target/release/nep-gw /usr/local/bin/nep-gw
+sudo install -m 644 nep-gw.service /etc/systemd/system/nep-gw.service
+
+# Broker address and credentials live in a root-only env file:
+sudo install -m 600 /dev/null /etc/nep-gw.env
+echo -e 'MQTT_HOST=192.168.1.50\nMQTT_USERNAME=homeassistant\nMQTT_PASSWORD=secret' | sudo tee /etc/nep-gw.env > /dev/null
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now nep-gw
+journalctl -u nep-gw -f
+```
+
+The unit enables dual-delivery by default (`--forward-upstream` in
+`ExecStart`); remove the flag from the unit to run purely locally.
+After rebuilding, re-run the `install` step and `sudo systemctl restart nep-gw`.
 
 ---
 
