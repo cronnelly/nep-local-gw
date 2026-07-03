@@ -83,8 +83,14 @@ fn parse_header(input: &[u8]) -> IResult<&[u8], ()> {
 }
 
 fn parse_data_section(input: &[u8]) -> IResult<&[u8], NepTelemetry> {
-    // 15-18: Sync marker
-    let (input, _) = tag([0xC3, 0xC3, 0xC3, 0xC3])(input)?;
+    // 15-18: Sync marker. Usually 0xC3C3C3C3, but after an inverter reset a
+    // live BDM-800 was observed emitting 0xFFFFFFFF here — presumably an
+    // "uninitialized" placeholder, just like the 0xFF Gateway/AP field on the
+    // BDM-400. The old exact match rejected such packets even though their
+    // checksums were valid. Packet integrity is already guaranteed by the dual
+    // checksums validated in parse_payload(), so skip the field instead of
+    // matching it. See CLAUDE.md.
+    let (input, _) = take(4usize)(input)?;
     // 19-22: Serial number
     let (input, serial_number) = le_u32(input)?;
     // 23-24: Status code
@@ -240,5 +246,42 @@ mod tests {
         assert_eq!(t.dc_current_ch1_a, 3.8); // byte 31 = 0x26 = 38 -> /10
         assert_eq!(t.dc_current_ch2_a, 4.2); // byte 32 = 0x2a = 42 -> /10
         assert_eq!(t.dc_current_a, 8.0);
+    }
+
+    #[test]
+    fn test_parse_payload_bdm800_post_reset_sync_marker() {
+        // Captured from the same live BDM-800 on the first report after the
+        // inverter was reset (serial anonymized to 0xDEADBEEF, checksums
+        // recomputed; every other byte as captured). Bytes 15..19 — normally
+        // the 0xC3C3C3C3 sync marker — read 0xFFFFFFFF here, which the old
+        // exact match rejected despite both checksums validating.
+        let hex = "792600401400000f0f0f0f00001c00ffffffffefbeadde0000b8ae581650104a55a631cf149104058c94cd1a42";
+        let bytes = hex::decode(hex).unwrap();
+        assert!(validate_checksums(&bytes));
+        let t = parse_payload(&bytes).unwrap();
+
+        assert_eq!(t.serial_number, 0xdeadbeef);
+        assert_eq!(t.ac_power_w, 447.28);
+        assert!((t.ac_voltage_v - 223.44).abs() < 0.01); // 5720 / 25.6
+        assert_eq!(t.ac_freq_hz, 49.6484375); // 12710 / 256
+        assert_eq!(t.temp_c, 53.27);
+        assert_eq!(t.daily_energy_wh, 233.8); // low: reset cleared the accumulator
+        assert_eq!(t.dc_current_ch1_a, 7.4); // byte 31 = 0x4a = 74 -> /10
+        assert_eq!(t.dc_current_ch2_a, 8.5); // byte 32 = 0x55 = 85 -> /10
+        assert_eq!(t.reactive_power_var, -129.08);
+    }
+
+    #[test]
+    fn test_parse_payload_rejects_bad_checksums() {
+        // Corrupting any body byte must fail checksum validation, now the only
+        // integrity guard for the relaxed gateway/AP and sync-marker fields.
+        let hex = "792600401400000f0f0f0f00001c00ffffffffefbeadde0000b8ae581650104a55a631cf149104058c94cd1a42";
+        let mut bytes = hex::decode(hex).unwrap();
+        bytes[25] ^= 0x01;
+        assert!(!validate_checksums(&bytes));
+        assert_eq!(
+            parse_payload(&bytes).unwrap_err(),
+            "Checksum validation failed"
+        );
     }
 }

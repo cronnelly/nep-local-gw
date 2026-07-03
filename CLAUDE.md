@@ -96,6 +96,23 @@ Why this is safe for existing BDM-400 users: on a BDM-400, byte 31 is always
 `test_parse_payload6`) still pass unchanged, and `test_parse_payload6`'s
 `dc_current_a == 2.6` assertion still holds.
 
+### 3. Sync-marker hard-reject after inverter reset (now fixed)
+
+On the first report after the BDM-800 was reset (2026-07-03), bytes 15–18 —
+normally the `0xC3C3C3C3` data-section sync marker — read `FF FF FF FF`. Both
+checksums validated and every telemetry field decoded physically sane (447 W AC
+midday, daily accumulator freshly cleared to 233.8 Wh), but
+`parse_data_section`'s exact `tag([0xC3; 4])` rejected the packet. Presumably
+the same "uninitialized placeholder" semantics as the 0xFF Gateway/AP field on
+the BDM-400. It is NOT a first-report transient: a report ~80 minutes after
+the reset still carried `FF FF FF FF`, so it may persist indefinitely (or
+until some yet-unidentified event). Fixed the same way as the
+Gateway/AP field: `take(4usize)` instead of the tag. Packet integrity relies on
+the dual checksums, which `parse_payload()` validates before parsing;
+`test_parse_payload_rejects_bad_checksums` pins that guard, and
+`test_parse_payload_bdm800_post_reset_sync_marker` pins the captured packet
+(serial anonymized, checksums recomputed).
+
 ## ⚠️ HYPOTHESIS — confirm before trusting per-channel DC values
 
 The byte→channel mapping (**byte 31 = channel 1, byte 32 = channel 2**) is

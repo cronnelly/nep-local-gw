@@ -36,7 +36,7 @@ The microinverter uploads unencrypted HTTP `POST` requests to `/i.php` containin
 | `3–4` | 2 | `uint16` (BE) | `0x4014` | Fixed command identifier |
 | `5–12` | 8 | `bytes` | model-dependent | Gateway/AP identifier (`0xFF` padding on BDM-400, other values on BDM-800; not matched by the parser) |
 | `13–14` | 2 | `uint16` (LE) | `28` | Length of data section (offset 15 to 42) |
-| `15–18` | 4 | `bytes` | `0xC3C3C3C3` | Data section synchronization header |
+| `15–18` | 4 | `bytes` | `0xC3C3C3C3` | Data section synchronization header (`0xFFFFFFFF` observed on the first report after an inverter reset; not matched by the parser — integrity comes from the checksums) |
 | `19–22` | 4 | `uint32` (LE) | Hex Integer | Inverter Serial Number |
 | `23–24` | 2 | `uint16` (LE) | `0` | General status / padding |
 | `25–26` | 2 | `uint16` (LE) | `/ 100.0` (W) | AC Active Power Output in Watts |
