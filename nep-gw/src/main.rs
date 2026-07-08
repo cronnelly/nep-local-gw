@@ -7,13 +7,15 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use nep_protocol::NepTelemetry;
+use nep_protocol::{InverterModel, NepTelemetry};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct AppState {
     pub tx: mpsc::Sender<NepTelemetry>,
+    /// Selects the model-specific field scales used by the payload parser.
+    pub model: InverterModel,
     /// `Some` when dual-delivery mode is enabled (--forward-upstream):
     /// inverter POSTs are also relayed to the real NEP cloud.
     pub upstream: Option<upstream::UpstreamForwarder>,
@@ -21,6 +23,7 @@ pub struct AppState {
 
 pub struct AppConfig {
     pub port: u16,
+    pub model: InverterModel,
     pub mqtt: mqtt::MqttConfig,
     pub upstream: Option<upstream::UpstreamConfig>,
 }
@@ -83,7 +86,9 @@ impl AppConfig {
                         "Unknown argument: {}\n\nUsage: nep-gw [--forward-upstream] [--upstream-url <url>] [--model <name>]\n\
                          \n  --forward-upstream   Also relay inverter POSTs to the real NEP cloud\n\
                          \n  --upstream-url <url> Upstream endpoint (default: {})\n\
-                         \n  --model <name>       Inverter model shown in Home Assistant (default: BDM-400)",
+                         \n  --model <name>       Inverter model: selects payload field scales and the\n\
+                         \n                       Home Assistant device metadata (BDM-400 or BDM-800,\n\
+                         \n                       default: BDM-400)",
                         other,
                         upstream::DEFAULT_UPSTREAM_URL
                     );
@@ -92,8 +97,21 @@ impl AppConfig {
             }
         }
 
+        // The model name also selects the payload field scales (the BDM-800
+        // power/energy words use different physical scaling than the BDM-400,
+        // see nep-protocol). Unrecognized names keep the given string for HA
+        // display but parse with the default BDM-400 scales.
+        let parsed_model = InverterModel::from_name(&model).unwrap_or_else(|| {
+            warn!(
+                "Unrecognized inverter model '{}'; parsing payloads with BDM-400 scales",
+                model
+            );
+            InverterModel::Bdm400
+        });
+
         Self {
             port,
+            model: parsed_model,
             mqtt: mqtt::MqttConfig {
                 host: mqtt_host,
                 port: mqtt_port,
@@ -127,8 +145,10 @@ async fn main() {
 
     // Create a channel to bridge HTTP requests to the MQTT worker
     let (tx, rx) = mpsc::channel::<NepTelemetry>(100);
+    info!("Parsing payloads with {:?} field scales", config.model);
     let app_state = Arc::new(AppState {
         tx,
+        model: config.model,
         upstream: forwarder,
     });
 

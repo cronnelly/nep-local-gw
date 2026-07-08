@@ -10,6 +10,9 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/nep-gw --forward-upstream
 Environment=PORT=80
 Environment=RUST_LOG=info
+# IMPORTANT for BDM-800 owners: the model selects the payload field scales,
+# not just Home Assistant metadata. Without it a BDM-800 reports ~21-27% low.
+# Environment=INVERTER_MODEL=BDM-800
 # MQTT_HOST / MQTT_PORT / MQTT_USERNAME / MQTT_PASSWORD (and UPSTREAM_URL etc.)
 # go in this root-owned, chmod-600 file so the password never appears in the
 # world-readable unit or in `systemctl show` output.

@@ -5,8 +5,68 @@ use nom::{
 };
 use serde::Serialize;
 
+/// Inverter model, which selects the physical scaling of the payload fields.
+///
+/// The AC-power and daily-energy words use different scales per model. The
+/// BDM-800 scales were calibrated on 2026-07-05 against a Shelly Outdoor
+/// PlugS Gen3 reference meter the inverter feeds through (see CLAUDE.md):
+/// the documented BDM-400 scales under-read a live BDM-800 by a flat x1.273
+/// (power) / x1.155 (energy) across 20-620 W and three days of history.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
+pub enum InverterModel {
+    #[default]
+    Bdm400,
+    Bdm800,
+}
+
+impl InverterModel {
+    /// Lenient parse of a model name ("BDM-800", "bdm800", ...). Returns
+    /// `None` for unrecognized names so callers can warn and pick a default.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let n: String = name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_uppercase();
+        match n.as_str() {
+            "BDM400" => Some(Self::Bdm400),
+            "BDM800" => Some(Self::Bdm800),
+            _ => None,
+        }
+    }
+
+    /// Scales the raw AC-power word (bytes 25-26) to Watts.
+    ///
+    /// BDM-400: /100 (documented; internally consistent with its captures but
+    /// never validated against a reference meter — it may share the BDM-800's
+    /// 4/pi error, see CLAUDE.md).
+    /// BDM-800: the Shelly-fitted correction is x1.2742 (weighted) / x1.2729
+    /// (median), statistically indistinguishable from 4/pi = 1.27324, so the
+    /// scale is taken as raw / (25*pi) ~= raw / 78.54.
+    fn scale_power_w(self, raw: u16) -> f64 {
+        match self {
+            Self::Bdm400 => raw as f64 / 100.0,
+            Self::Bdm800 => raw as f64 / (25.0 * std::f64::consts::PI),
+        }
+    }
+
+    /// Scales the raw daily-energy word (bytes 37-38) to Watt-hours.
+    ///
+    /// BDM-400: 0.2 Wh per count (documented, same caveat as the power scale).
+    /// BDM-800: 0.2308 Wh per count — pooled fit over four clean monotonic
+    /// counter segments vs the Shelly reference (0.2301..0.2314, ~= 3/13).
+    fn scale_energy_wh(self, raw: u16) -> f64 {
+        match self {
+            Self::Bdm400 => raw as f64 / 5.0,
+            Self::Bdm800 => raw as f64 * 0.2308,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct NepTelemetry {
+    /// Model whose scales were used to decode this packet.
+    pub model: InverterModel,
     pub serial_number: u32,
     pub status_code: u16,
     pub ac_power_w: f64,
@@ -39,13 +99,20 @@ impl NepTelemetry {
     }
 
     /// Decodes the w8 low byte into a human-readable operating mode string.
+    ///
+    /// The mode byte is model-specific: a live BDM-800 emits 0x05 while
+    /// generating at full power (confirmed against a reference meter all day
+    /// on 2026-07-05), whereas on the BDM-400 0x05 was only ever seen during
+    /// a grid-event transition. The documented bit-mask reading (bit0 sleep /
+    /// bit1 MPPT / bit2 relay) does not transfer across models.
     pub fn operating_mode_str(&self) -> &'static str {
         let w8_low = self.version_raw & 0xFF;
-        match w8_low {
-            0x01 => "Deep Sleep",
-            0x04 => "Awake Standby",
-            0x05 => "Active Standby",
-            0x06 => "Generating",
+        match (self.model, w8_low) {
+            (InverterModel::Bdm800, 0x05) => "Generating",
+            (_, 0x01) => "Deep Sleep",
+            (_, 0x04) => "Awake Standby",
+            (_, 0x05) => "Active Standby",
+            (_, 0x06) => "Generating",
             _ => "Unknown State",
         }
     }
@@ -82,7 +149,7 @@ fn parse_header(input: &[u8]) -> IResult<&[u8], ()> {
     Ok((input, ()))
 }
 
-fn parse_data_section(input: &[u8]) -> IResult<&[u8], NepTelemetry> {
+fn parse_data_section(input: &[u8], model: InverterModel) -> IResult<&[u8], NepTelemetry> {
     // 15-18: Sync marker. Usually 0xC3C3C3C3, but after an inverter reset a
     // live BDM-800 was observed emitting 0xFFFFFFFF here — presumably an
     // "uninitialized" placeholder, just like the 0xFF Gateway/AP field on the
@@ -114,7 +181,7 @@ fn parse_data_section(input: &[u8]) -> IResult<&[u8], NepTelemetry> {
     // 41-42: Reactive Power (signed)
     let (input, reactive_power_raw) = le_i16(input)?;
 
-    let ac_power_w = ac_power_raw as f64 / 100.0;
+    let ac_power_w = model.scale_power_w(ac_power_raw);
     let ac_voltage_v = ac_voltage_raw as f64 / 25.6;
     // DC input current. On the single-input BDM-400 the high byte (offset 31)
     // is always 0x00 and the low byte (offset 32) carries the single string's
@@ -136,7 +203,7 @@ fn parse_data_section(input: &[u8]) -> IResult<&[u8], NepTelemetry> {
     let dc_current_a = dc_current_ch1_a + dc_current_ch2_a;
     let ac_freq_hz = ac_freq_raw as f64 / 256.0;
     let temp_c = temp_raw as f64 / 100.0;
-    let daily_energy_wh = daily_energy_raw as f64 / 5.0; // 0.2 Wh per unit
+    let daily_energy_wh = model.scale_energy_wh(daily_energy_raw);
     let dc_voltage_v = if dc_current_a > 0.05 {
         (ac_power_w / (0.96 * dc_current_a)).min(60.0)
     } else {
@@ -148,6 +215,7 @@ fn parse_data_section(input: &[u8]) -> IResult<&[u8], NepTelemetry> {
     Ok((
         input,
         NepTelemetry {
+            model,
             serial_number,
             status_code,
             ac_power_w,
@@ -167,9 +235,8 @@ fn parse_data_section(input: &[u8]) -> IResult<&[u8], NepTelemetry> {
     ))
 }
 
-/// Parses the entire 45-byte payload.
-/// pub fn parse_payload(input: &[u8]) -> Result<NepTelemetry, String> {
-pub fn parse_payload(input: &[u8]) -> Result<NepTelemetry, String> {
+/// Parses the entire 45-byte payload, scaling fields for the given model.
+pub fn parse_payload(input: &[u8], model: InverterModel) -> Result<NepTelemetry, String> {
     if input.len() < 45 {
         return Err(format!(
             "Payload too short: expected 45 bytes, got {}",
@@ -182,7 +249,7 @@ pub fn parse_payload(input: &[u8]) -> Result<NepTelemetry, String> {
 
     let (remaining, _) =
         parse_header(input).map_err(|e| format!("Header parsing failed: {:?}", e))?;
-    let (_, telemetry) = parse_data_section(remaining)
+    let (_, telemetry) = parse_data_section(remaining, model)
         .map_err(|e| format!("Data section parsing failed: {:?}", e))?;
     Ok(telemetry)
 }
@@ -196,7 +263,7 @@ mod tests {
         let hex = "7926004014ffffffffffffffff1c00c3c3c3c3785634120000755752172010002bfe31cf145c1a0684bb2e395f";
         let bytes = hex::decode(hex).unwrap();
         assert!(validate_checksums(&bytes));
-        let telemetry = parse_payload(&bytes).unwrap();
+        let telemetry = parse_payload(&bytes, InverterModel::Bdm400).unwrap();
         assert_eq!(telemetry.serial_number, 0x12345678);
         assert_eq!(telemetry.ac_power_w, 223.89);
         assert_eq!(telemetry.ac_voltage_v, 233.203125); // 5970 / 25.6
@@ -210,7 +277,7 @@ mod tests {
         let hex = "7926004014ffffffffffffffff1c00c3c3c3c3785634120000443552183010001af8312f136a21068402026f5b";
         let bytes = hex::decode(hex).unwrap();
         assert!(validate_checksums(&bytes));
-        let telemetry = parse_payload(&bytes).unwrap();
+        let telemetry = parse_payload(&bytes, InverterModel::Bdm400).unwrap();
         assert_eq!(telemetry.serial_number, 0x12345678);
         assert_eq!(telemetry.ac_power_w, 136.36);
         assert_eq!(telemetry.dc_current_a, 2.6);
@@ -232,14 +299,19 @@ mod tests {
         let hex = "792600401400000f0f0f0f00001c00c3c3c3c3efbeadde0000bd56cb172010262ab0317013ab12058c05e02270";
         let bytes = hex::decode(hex).unwrap();
         assert!(validate_checksums(&bytes));
-        let t = parse_payload(&bytes).unwrap();
+        let t = parse_payload(&bytes, InverterModel::Bdm800).unwrap();
 
-        // AC-side fields decode identically to the BDM-400 layout.
+        // AC power and daily energy use the Shelly-calibrated BDM-800 scales
+        // (raw * 4/(100*pi) W and raw * 0.2308 Wh); the other fields decode
+        // identically to the BDM-400 layout.
         assert_eq!(t.serial_number, 0xdeadbeef);
-        assert_eq!(t.ac_power_w, 222.05);
+        assert!((t.ac_power_w - 282.72).abs() < 0.01); // 22205 * 4/(100*pi)
         assert_eq!(t.ac_freq_hz, 49.6875); // 12720 / 256
         assert!((t.ac_voltage_v - 237.93).abs() < 0.01); // 6091 / 25.6
-        assert_eq!(t.daily_energy_wh, 955.8);
+        assert!((t.daily_energy_wh - 1102.99).abs() < 0.01); // 4779 * 0.2308
+        // Mode byte 0x05 means "generating" on the BDM-800 (confirmed against
+        // a reference meter), not the BDM-400's "Active Standby".
+        assert_eq!(t.operating_mode_str(), "Generating");
 
         // DC-side: two per-string currents that sum to a physically sane total,
         // instead of the ~977 A the single-BE-u16 interpretation produced.
@@ -258,14 +330,14 @@ mod tests {
         let hex = "792600401400000f0f0f0f00001c00ffffffffefbeadde0000b8ae581650104a55a631cf149104058c94cd1a42";
         let bytes = hex::decode(hex).unwrap();
         assert!(validate_checksums(&bytes));
-        let t = parse_payload(&bytes).unwrap();
+        let t = parse_payload(&bytes, InverterModel::Bdm800).unwrap();
 
         assert_eq!(t.serial_number, 0xdeadbeef);
-        assert_eq!(t.ac_power_w, 447.28);
+        assert!((t.ac_power_w - 569.49).abs() < 0.01); // 44728 * 4/(100*pi)
         assert!((t.ac_voltage_v - 223.44).abs() < 0.01); // 5720 / 25.6
         assert_eq!(t.ac_freq_hz, 49.6484375); // 12710 / 256
         assert_eq!(t.temp_c, 53.27);
-        assert_eq!(t.daily_energy_wh, 233.8); // low: reset cleared the accumulator
+        assert!((t.daily_energy_wh - 269.81).abs() < 0.01); // 1169 * 0.2308; low: reset cleared the accumulator
         assert_eq!(t.dc_current_ch1_a, 7.4); // byte 31 = 0x4a = 74 -> /10
         assert_eq!(t.dc_current_ch2_a, 8.5); // byte 32 = 0x55 = 85 -> /10
         assert_eq!(t.reactive_power_var, -129.08);
@@ -280,8 +352,16 @@ mod tests {
         bytes[25] ^= 0x01;
         assert!(!validate_checksums(&bytes));
         assert_eq!(
-            parse_payload(&bytes).unwrap_err(),
+            parse_payload(&bytes, InverterModel::Bdm800).unwrap_err(),
             "Checksum validation failed"
         );
+    }
+
+    #[test]
+    fn test_inverter_model_from_name() {
+        assert_eq!(InverterModel::from_name("BDM-800"), Some(InverterModel::Bdm800));
+        assert_eq!(InverterModel::from_name("bdm800"), Some(InverterModel::Bdm800));
+        assert_eq!(InverterModel::from_name("BDM 400"), Some(InverterModel::Bdm400));
+        assert_eq!(InverterModel::from_name("BDM-600"), None);
     }
 }

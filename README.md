@@ -17,7 +17,7 @@ It operates by spoofing the cloud endpoint `http://www.nepviewer.net/i.php`, par
 * **Auto-Discovery in Home Assistant**: Automatic sensor creation in Home Assistant via MQTT Discovery (voltage, power, daily energy, temperature, frequency, reactive power, status).
 * **Prometheus Metrics**: Scraping endpoint `/metrics` for custom Grafana dashboards.
 * **NOM Parser**: Fast, safe binary parsing of the 45-byte payload implemented in Rust.
-* **BDM-400 & BDM-800 Support**: Handles both the single-input BDM-400 and the dual-MPPT BDM-800, including independent per-channel DC current readings on the BDM-800 (verified against a live packet capture). Set the Home Assistant model name via `INVERTER_MODEL` / `--model`.
+* **BDM-400 & BDM-800 Support**: Handles both the single-input BDM-400 and the dual-MPPT BDM-800, including independent per-channel DC current readings on the BDM-800 (verified against a live packet capture). Set `INVERTER_MODEL` / `--model` to your model — it selects the payload field scales, not just Home Assistant metadata: the BDM-800's AC-power and daily-energy words use different scaling, calibrated against a reference meter (with BDM-400 scales a BDM-800 under-reads power by ~27%). See `CLAUDE.md` for the calibration data.
 * **Optional Cloud Passthrough**: Dual-delivery mode (`--forward-upstream`) relays packets to the real NEP cloud so the official app keeps working alongside local monitoring.
 * **DC Voltage & Power Reconstruction**: Dynamically estimates DC PV voltage and panel power using standard inverter efficiency curves (since the inverter natively omits DC PV voltage from its uploads). ⚠️ The reconstruction assumes the BDM-400's panel topology — on the BDM-800 the AC-side values and per-channel DC currents are reliable, but treat reconstructed DC voltage/power/efficiency with skepticism.
 
@@ -39,13 +39,13 @@ The microinverter uploads unencrypted HTTP `POST` requests to `/i.php` containin
 | `15–18` | 4 | `bytes` | `0xC3C3C3C3` | Data section synchronization header (`0xFFFFFFFF` observed on the first report after an inverter reset; not matched by the parser — integrity comes from the checksums) |
 | `19–22` | 4 | `uint32` (LE) | Hex Integer | Inverter Serial Number |
 | `23–24` | 2 | `uint16` (LE) | `0` | General status / padding |
-| `25–26` | 2 | `uint16` (LE) | `/ 100.0` (W) | AC Active Power Output in Watts |
+| `25–26` | 2 | `uint16` (LE) | `/ 100.0` (W) on BDM-400, `/ 25π ≈ 78.54` (W) on BDM-800 | AC Active Power Output in Watts (BDM-800 scale calibrated against a reference meter, flat ×(4/π) vs the BDM-400 scale across 20–620 W) |
 | `27–28` | 2 | `uint16` (LE) | `/ 25.6` (V) | Grid AC Voltage in Volts (Q8 decivolts) |
 | `29–30` | 2 | `uint16` (LE) | Bitmask / Vref | Internal flags and DSP Reference Voltage |
 | `31–32` | 2 | `2 × uint8` | `/ 10.0` (A) each | DC Input Current per MPPT channel (byte 31 = CH1, byte 32 = CH2; CH1 always `0` on the single-input BDM-400 — channel order inferred from a single BDM-800 capture) |
 | `33–34` | 2 | `uint16` (LE) | `/ 256.0` (Hz) | Grid AC Frequency in Hertz (Q8 Hz) |
 | `35–36` | 2 | `uint16` (LE) | `/ 100.0` (°C) | DSP Temperature in Celsius |
-| `37–38` | 2 | `uint16` (LE) | `/ 5.0` (Wh) | Daily Energy Accumulator in Wh (0.2 Wh / unit) |
+| `37–38` | 2 | `uint16` (LE) | `× 0.2` (Wh) on BDM-400, `× 0.2308` (Wh) on BDM-800 | Daily Energy Accumulator in Wh (resets at dawn, not midnight; on a manual inverter reset it can warp back to a stale flash-persisted value) |
 | `39–40` | 2 | `uint16` (LE) | Bitmask | Firmware Version & Relay/State bits |
 | `41–42` | 2 | `int16` (LE) | `/ 100.0` (VAR) | AC Reactive Power in signed Volt-Amperes Reactive |
 | `43` | 1 | `uint8` | sum % 256 | **Additive Checksum** (bytes 1 to 42) |
@@ -73,7 +73,7 @@ The gateway is configured via the following environment variables:
 | `MQTT_USERNAME` | Username for MQTT broker authentication (omit for anonymous) | *(none)* |
 | `MQTT_PASSWORD` | Password for MQTT broker authentication (requires `MQTT_USERNAME`) | *(empty)* |
 | `RUST_LOG` | Tracing logging level (`info`, `debug`, `error`) | `info` |
-| `INVERTER_MODEL` | Inverter model shown in Home Assistant (e.g. `BDM-800`); also `--model <name>` | `BDM-400` |
+| `INVERTER_MODEL` | Inverter model: selects payload field scales (AC power, daily energy) and Home Assistant metadata (`BDM-400` or `BDM-800`); also `--model <name>` | `BDM-400` |
 | `FORWARD_UPSTREAM` | Set to `true` to also relay inverter POSTs to the real NEP cloud (dual-delivery mode) | `false` |
 | `UPSTREAM_URL` | Upstream endpoint used in dual-delivery mode (plain HTTP only) | `http://www.nepviewer.net/i.php` |
 

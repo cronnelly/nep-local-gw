@@ -47,7 +47,7 @@ pub async fn handle_inverter_post(
         }
     }
 
-    match parse_payload(&body) {
+    match parse_payload(&body, state.model) {
         Ok(telemetry) => {
             info!(
                 "Successfully parsed telemetry from serial: {:08x}",
