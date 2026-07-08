@@ -40,7 +40,7 @@ The microinverter uploads unencrypted HTTP `POST` requests to `/i.php` containin
 | `19–22` | 4 | `uint32` (LE) | Hex Integer | Inverter Serial Number |
 | `23–24` | 2 | `uint16` (LE) | `0` | General status / padding |
 | `25–26` | 2 | `uint16` (LE) | `/ 100.0` (W) on BDM-400, `/ 25π ≈ 78.54` (W) on BDM-800 | AC Active Power Output in Watts (BDM-800 scale calibrated against a reference meter, flat ×(4/π) vs the BDM-400 scale across 20–620 W) |
-| `27–28` | 2 | `uint16` (LE) | `/ 25.6` (V) | Grid AC Voltage in Volts (Q8 decivolts) |
+| `27–28` | 2 | `uint16` (LE) | `/ 25.6` (V) | Internal voltage measurement — ⚠️ not grid RMS voltage: on a live BDM-800 it rests at V_peak/2 when idle and droops with output power when generating, coinciding with grid voltage only around 400–550 W (see `CLAUDE.md`) |
 | `29–30` | 2 | `uint16` (LE) | Bitmask / Vref | Internal flags and DSP Reference Voltage |
 | `31–32` | 2 | `2 × uint8` | `/ 10.0` (A) each | DC Input Current per MPPT channel (byte 31 = CH1, byte 32 = CH2; CH1 always `0` on the single-input BDM-400 — channel order inferred from a single BDM-800 capture) |
 | `33–34` | 2 | `uint16` (LE) | `/ 256.0` (Hz) | Grid AC Frequency in Hertz (Q8 Hz) |

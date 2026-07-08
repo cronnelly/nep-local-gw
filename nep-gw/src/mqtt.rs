@@ -1,4 +1,4 @@
-use nep_protocol::NepTelemetry;
+use nep_protocol::{InverterModel, NepTelemetry};
 use rumqttc::{AsyncClient, MqttOptions, QoS};
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -58,7 +58,9 @@ pub async fn run_mqtt_worker(config: MqttConfig, mut rx: mpsc::Receiver<NepTelem
                 "Publishing Home Assistant MQTT Discovery configs for serial {}...",
                 serial
             );
-            if let Err(e) = publish_ha_discovery(&client, &serial, &config.model).await {
+            if let Err(e) =
+                publish_ha_discovery(&client, &serial, &config.model, telemetry.model).await
+            {
                 error!("HA Discovery publish failed: {:?}", e);
             } else {
                 discovered = true;
@@ -112,6 +114,7 @@ async fn publish_ha_discovery(
     client: &AsyncClient,
     serial: &str,
     model: &str,
+    model_kind: InverterModel,
 ) -> Result<(), rumqttc::ClientError> {
     let device = json!({
         "identifiers": [format!("nep_bdm_{}", serial)],
@@ -122,11 +125,23 @@ async fn publish_ha_discovery(
 
     let state_topic = format!("nep/telemetry/{}", serial);
 
+    // Bytes 27-28 turned out to be an internal voltage measurement, not grid
+    // RMS voltage: on a live BDM-800 it rests at V_peak/2 when idle and
+    // droops with output power when generating, only coincidentally matching
+    // grid voltage around 400-550 W (see CLAUDE.md). Label it honestly on the
+    // BDM-800; the BDM-400 keeps its historical name pending confirmation
+    // against a reference meter. The unique_id stays "ac_voltage" either way
+    // so existing HA entities and their history are preserved.
+    let ac_voltage_label = match model_kind {
+        InverterModel::Bdm800 => "Internal Bus Voltage",
+        InverterModel::Bdm400 => "AC Grid Voltage",
+    };
+
     let sensors = vec![
         ("ac_power", "AC Output Power", "power", "W", "ac_power_w"),
         (
             "ac_voltage",
-            "AC Grid Voltage",
+            ac_voltage_label,
             "voltage",
             "V",
             "ac_voltage_v",

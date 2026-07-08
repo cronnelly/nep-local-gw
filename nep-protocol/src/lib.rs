@@ -70,6 +70,12 @@ pub struct NepTelemetry {
     pub serial_number: u32,
     pub status_code: u16,
     pub ac_power_w: f64,
+    /// Decoded from bytes 27-28 at /25.6. CAUTION: on the BDM-800 this is an
+    /// internal voltage measurement, NOT grid RMS voltage — it rests at
+    /// V_peak/2 when idle and droops with output power when generating,
+    /// matching grid voltage only around 400-550 W (see CLAUDE.md). The
+    /// BDM-400's "grid voltage" interpretation is unconfirmed against a
+    /// reference meter and likely has the same behaviour.
     pub ac_voltage_v: f64,
     pub operating_flags: u16,
     /// Total DC input current in Amperes (sum of both MPPT channels).
@@ -164,7 +170,8 @@ fn parse_data_section(input: &[u8], model: InverterModel) -> IResult<&[u8], NepT
     let (input, status_code) = le_u16(input)?;
     // 25-26: AC Power
     let (input, ac_power_raw) = le_u16(input)?;
-    // 27-28: AC Voltage
+    // 27-28: voltage word — an internal measurement, not grid RMS (see the
+    // ac_voltage_v field docs and CLAUDE.md).
     let (input, ac_voltage_raw) = le_u16(input)?;
     // 29-30: Operating flags
     let (input, operating_flags) = le_u16(input)?;
