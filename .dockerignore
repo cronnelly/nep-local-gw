@@ -1,0 +1,6 @@
+target/
+.git/
+.claude/
+__pycache__/
+*.py
+*.pcap

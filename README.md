@@ -135,7 +135,10 @@ After rebuilding, re-run the `install` step and `sudo systemctl restart nep-gw`.
 
 ## 🐳 Docker Deployment
 
-The gateway is packaged in an optimized Alpine-based multi-stage Dockerfile that supports compilation for multi-arch targets (including `aarch64` ARM targets like Raspberry Pi).
+The gateway is packaged in a small Alpine-based multi-stage Dockerfile that builds a static musl binary for whatever platform it is built on (so `docker build` on a Raspberry Pi gives an `aarch64` image).
+
+### Published image
+A GitHub Actions workflow (`.github/workflows/publish.yml`) builds the image on every push and publishes `linux/amd64` images to `ghcr.io/cronnelly/nep-local-gw` for version tags: pushing git tag `v0.1.0` publishes image tags `0.1.0` and `latest`. The git tag must match `nep-gw/Cargo.toml`'s version, so bump that first.
 
 ### Build Image
 ```bash
@@ -151,6 +154,8 @@ docker run -d \
   -e MQTT_HOST=192.168.1.50 \
   -e MQTT_PORT=1883 \
   -e RUST_LOG=info \
+  -e INVERTER_MODEL=BDM-800 \
+  -e FORWARD_UPSTREAM=true \
   --restart unless-stopped \
   nep-gw
 ```

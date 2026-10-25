@@ -1,31 +1,19 @@
-# Stage 1: Chef - Setup cargo-chef base
-FROM rust:alpine AS chef
-# Install build dependencies
-RUN apk add --no-cache musl-dev pkgconfig cmake make g++ git openssl-dev perl
-RUN cargo install --locked cargo-chef
-RUN rustup target add aarch64-unknown-linux-musl
+# Stage 1: Builder - static musl binary for the build platform (amd64 in CI)
+FROM rust:1-alpine AS builder
+RUN apk add --no-cache musl-dev
 WORKDIR /app
-
-# Stage 2: Planner - Prepare cargo-chef recipe
-FROM chef AS planner
 COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
+RUN cargo build --release --locked --bin nep-gw
 
-# Stage 3: Builder - Cook dependencies & compile application
-FROM chef AS builder
-COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --target aarch64-unknown-linux-musl --recipe-path recipe.json
-
-# Build the actual application
-COPY . .
-RUN cargo build --release --target aarch64-unknown-linux-musl --bin nep-gw
-
-# Stage 4: Runtime - Minimal alpine image
-FROM alpine:latest AS runtime
+# Stage 2: Runtime - Minimal alpine image
+FROM alpine:3.24 AS runtime
 RUN apk add --no-cache ca-certificates tzdata
-WORKDIR /app
-COPY --from=builder /app/target/aarch64-unknown-linux-musl/release/nep-gw /usr/local/bin/nep-gw
+COPY --from=builder /app/target/release/nep-gw /usr/local/bin/nep-gw
 
-EXPOSE 8080
+# Configuration is all environment: PORT (default 80), RUST_LOG, MQTT_HOST,
+# MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD, INVERTER_MODEL, FORWARD_UPSTREAM,
+# UPSTREAM_URL. See README.md.
+ENV RUST_LOG=info
+EXPOSE 80
 
 CMD ["/usr/local/bin/nep-gw"]
